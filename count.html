@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>脱出タイマー</title>
+<style>
+  :root { --c:#33ffcc; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; background:#000; overflow:hidden; cursor:none; font-family:"Consolas","Courier New",monospace; }
+  body { color:var(--c); display:flex; flex-direction:column; align-items:center; justify-content:center; transition:color .4s; }
+  body.warn { --c:#ffb000; }
+  body.danger { --c:#ff2a2a; }
+  body.critical { --c:#ff0000; }
+  #flash { position:fixed; inset:0; pointer-events:none; background:radial-gradient(ellipse at center, transparent 40%, rgba(255,0,0,.55) 100%); opacity:0; }
+  body.danger #flash { animation:blink 1s infinite; }
+  body.critical #flash { animation:blink .5s infinite; }
+  body.over #flash { animation:none; opacity:.6; }
+  @keyframes blink { 0%,100%{opacity:0} 50%{opacity:1} }
+  #label { font-size:3.2vw; letter-spacing:.6em; opacity:.8; margin-bottom:1vh; }
+  #time { font-size:30vw; line-height:1; font-weight:bold; text-shadow:0 0 3vw var(--c), 0 0 8vw var(--c); font-variant-numeric:tabular-nums; }
+  body.critical #time { animation:shake .12s infinite; }
+  body.danger #time, body.critical #time { text-shadow:0 0 4vw var(--c), 0 0 10vw var(--c); }
+  @keyframes shake { 0%{transform:translate(0,0)} 25%{transform:translate(.4vw,.2vw)} 50%{transform:translate(-.3vw,-.3vw)} 75%{transform:translate(.2vw,-.2vw)} 100%{transform:translate(0,0)} }
+  #status { font-size:3vw; letter-spacing:.3em; height:5vw; margin-top:1vh; }
+  canvas { position:fixed; left:0; bottom:0; width:100%; height:18vh; opacity:.85; }
+  #hint { position:fixed; top:1vh; left:1vw; font-size:1.1vw; color:#557; line-height:1.6; white-space:pre; transition:opacity .5s; }
+  #hint.hide { opacity:0; }
+  #msg { position:fixed; top:1vh; right:1vw; font-size:1.4vw; color:#fff; opacity:0; transition:opacity .3s; }
+</style>
+</head>
+<body>
+<div id="flash"></div>
+<div id="label">E M E R G E N C Y</div>
+<div id="time">40:00</div>
+<div id="status">PRESS SPACE</div>
+<canvas id="ecg"></canvas>
+<div id="hint">[Space] 開始 / 一時停止
+[←][→] ±1分   [↑][↓] ±10秒
+[R] リセット(40:00)   [F] 全画面
+[H] この説明を隠す</div>
+<div id="msg"></div>
+
+<script>
+const TOTAL = 40*60*1000;
+let remaining = TOTAL, running = false, endAt = 0, stage = 'normal', started = false;
+
+const elTime = document.getElementById('time');
+const elStatus = document.getElementById('status');
+const elLabel = document.getElementById('label');
+const elMsg = document.getElementById('msg');
+
+// ---------- Audio ----------
+let ac = null;
+function audio(){ if(!ac) ac = new (window.AudioContext||window.webkitAudioContext)(); if(ac.state==='suspended') ac.resume(); return ac; }
+function beep(freq=880, dur=.15, vol=.25, type='square', delay=0){
+  const a = audio(), t = a.currentTime + delay;
+  const o = a.createOscillator(), g = a.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(.001, t+dur);
+  o.connect(g); g.connect(a.destination);
+  o.start(t); o.stop(t+dur+.02);
+}
+function alarm(n=3, freq=880){ for(let i=0;i<n;i++) beep(freq,.18,.3,'square',i*.25); }
+
+// ---------- Stage ----------
+function stageOf(ms){
+  if(ms<=0) return 'over';
+  if(ms<=60000) return 'critical';
+  if(ms<=300000) return 'danger';
+  if(ms<=600000) return 'warn';
+  return 'normal';
+}
+function applyStage(s, announce){
+  document.body.className = s;
+  const text = {normal:'', warn:'REMAINING 10 MIN', danger:'REMAINING 5 MIN — WARNING', critical:'FINAL MINUTE', over:'GAME OVER'};
+  const label = {normal:'E M E R G E N C Y', warn:'C A U T I O N', danger:'W A R N I N G', critical:'D A N G E R', over:'F L A T L I N E'};
+  elLabel.textContent = label[s];
+  if(running || s==='over') elStatus.textContent = text[s];
+  if(announce){
+    if(s==='warn') alarm(2, 660);
+    else if(s==='danger') alarm(3, 880);
+    else if(s==='critical') alarm(5, 1100);
+    else if(s==='over'){ beep(440,2.5,.4,'sawtooth'); }
+  }
+}
+
+// ---------- Display ----------
+function fmt(ms){
+  const s = Math.max(0, Math.ceil(ms/1000));
+  return String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
+}
+let lastSec = -1;
+function update(){
+  if(running){
+    remaining = endAt - performance.now();
+    if(remaining<=0){ remaining=0; running=false; }
+  }
+  elTime.textContent = fmt(remaining);
+  const s = stageOf(remaining);
+  if(s!==stage){
+    const announce = (started && (running || s==='over'));
+    stage = s; applyStage(s, announce);
+  }
+  // last-minute tick each second
+  const sec = Math.ceil(remaining/1000);
+  if(running && sec!==lastSec && remaining<=60000 && remaining>0) beep(1000,.06,.2);
+  else if(running && sec!==lastSec && remaining<=300000 && remaining>60000 && sec%10===0) beep(700,.05,.12);
+  lastSec = sec;
+  requestAnimationFrame(update);
+}
+
+// ---------- Controls ----------
+function flashMsg(t){ elMsg.textContent=t; elMsg.style.opacity=1; clearTimeout(flashMsg.t); flashMsg.t=setTimeout(()=>elMsg.style.opacity=0,1200); }
+function toggle(){
+  audio();
+  if(remaining<=0) return;
+  if(running){ running=false; elStatus.textContent='PAUSED'; }
+  else { running=true; started=true; endAt = performance.now()+remaining; elStatus.textContent = ''; applyStage(stage,false); }
+}
+function adjust(ms){
+  remaining = Math.max(0, Math.min(remaining+ms, 99*60*1000));
+  if(running) endAt = performance.now()+remaining;
+  flashMsg((ms>0?'+':'−')+Math.abs(ms/1000)+'秒');
+}
+function reset(){ running=false; started=false; remaining=TOTAL; stage='normal'; applyStage('normal',false); elStatus.textContent='PRESS SPACE'; lastSec=-1; }
+
+document.addEventListener('keydown', e=>{
+  if(e.repeat && e.code==='Space') return;
+  switch(e.code){
+    case 'Space': e.preventDefault(); toggle(); break;
+    case 'ArrowRight': e.preventDefault(); adjust(60000); break;
+    case 'ArrowLeft':  e.preventDefault(); adjust(-60000); break;
+    case 'ArrowUp':    e.preventDefault(); adjust(10000); break;
+    case 'ArrowDown':  e.preventDefault(); adjust(-10000); break;
+    case 'KeyR': reset(); break;
+    case 'KeyH': document.getElementById('hint').classList.toggle('hide'); break;
+    case 'KeyF':
+      if(document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen();
+      break;
+  }
+});
+setTimeout(()=>document.getElementById('hint').classList.add('hide'), 15000);
+
+// ---------- ECG ----------
+const cv = document.getElementById('ecg'), cx = cv.getContext('2d');
+function resize(){ cv.width = innerWidth; cv.height = innerHeight*0.18; }
+resize(); addEventListener('resize', resize);
+const g = (x,c,w)=>Math.exp(-((x-c)**2)/(2*w*w));
+function wave(p){
+  return .12*g(p,.12,.03) - .15*g(p,.2,.012) + 1*g(p,.23,.009) - .25*g(p,.26,.012) + .22*g(p,.42,.05);
+}
+let samples = [], phase = 0, lastT = performance.now();
+function bpm(){ return {normal:60,warn:80,danger:110,critical:150,over:0}[stage]; }
+function drawECG(now){
+  const dt = (now-lastT)/1000; lastT = now;
+  const step = 3; // px per sample
+  const pxPerSec = 260;
+  const n = Math.max(1, Math.round(dt*pxPerSec/step));
+  const b = bpm();
+  for(let i=0;i<n;i++){
+    if(b>0){ phase += (b/60)*(1/ (pxPerSec/step)); phase %= 1; samples.push(running||stage==='over'||true ? wave(phase) : 0); }
+    else samples.push(0);
+  }
+  const max = Math.ceil(cv.width/step)+2;
+  if(samples.length>max) samples.splice(0, samples.length-max);
+  cx.clearRect(0,0,cv.width,cv.height);
+  const col = getComputedStyle(document.body).getPropertyValue('--c').trim() || '#33ffcc';
+  cx.strokeStyle = col; cx.lineWidth = 3; cx.shadowColor = col; cx.shadowBlur = 12;
+  cx.beginPath();
+  const base = cv.height*.7, amp = cv.height*.6;
+  samples.forEach((v,i)=>{ const x = i*step, y = base - v*amp; i? cx.lineTo(x,y) : cx.moveTo(x,y); });
+  cx.stroke();
+  requestAnimationFrame(drawECG);
+}
+
+applyStage('normal', false);
+requestAnimationFrame(update);
+requestAnimationFrame(drawECG);
+</script>
+</body>
+</html>
